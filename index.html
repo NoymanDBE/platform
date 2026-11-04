@@ -6,7 +6,7 @@
 <title>Meta-Analysis — Data Extraction</title>
 <script>const BACKEND_URL = "https://script.google.com/macros/s/AKfycbxN5YoH0269qzAdNHsf9REMM9pke5xuUlgeNRy2DyMJQ1r5a8hrJaXVh2e7e-7O05dy/exec";
 // bump on every release — shown in the header so a stale copy is obvious at a glance
-const GUI_VERSION = "5.42";</script>
+const GUI_VERSION = "5.43";</script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
   :root{  /* black & gold */
@@ -398,7 +398,7 @@ const GUI_VERSION = "5.42";</script>
       </div>
       <div class="navbtns">
         <button class="btn sec" onclick="goStep(0)">← Back</button><div class="spacer"></div>
-        <button class="btn sec" onclick="submitOne(submitBackground,'Saving background…')" title="Optional — “Finish study” submits this for you. Use this only to save this section now.">Submit background now</button>
+        <button class="btn sec" onclick="submitOne(submitBackground,'Saving background…')" title="Submits this section to the platform now. While outcomes are a later stage this button IS how Background is submitted; once outcomes are open, “Finish study” also submits it for you.">Submit background now</button>
         <button class="btn" onclick="goStep(2)">Continue to RoB →</button>
       </div>
     </div>
@@ -423,7 +423,7 @@ const GUI_VERSION = "5.42";</script>
       </div>
       <div class="navbtns">
         <button class="btn sec" onclick="goStep(1)">← Back</button><div class="spacer"></div>
-        <button class="btn sec" onclick="submitOne(submitRoB,'Saving Risk of Bias…')" title="Optional — “Finish study” submits this for you. Use this only to save this section now.">Submit RoB now</button>
+        <button class="btn sec" onclick="submitOne(submitRoB,'Saving Risk of Bias…')" title="Submits this section to the platform now. While outcomes are a later stage this button IS how the RoB is submitted; once outcomes are open, “Finish study” also submits it for you.">Submit RoB now</button>
         <button class="btn" onclick="goStep(3)">Continue to Outcomes →</button>
       </div>
     </div>
@@ -619,6 +619,27 @@ async function checkVersion(){
   }catch(e){}
 }
 function updateReload(){ if(REVIEWER)sessionSave(); location.reload(); }
+// v5.43: stage toggles must reach sessions that are already signed in — the
+// flags are re-fetched periodically and on tab focus, and a change redraws
+// the gates right away (with a toast, so the unlock isn't silent).
+let LAST_SCHECK=0;
+async function refreshStageFlags(){
+  if(!CODE||!CONFIG)return;
+  const t=Date.now(); if(t-LAST_SCHECK<60000)return; LAST_SCHECK=t;
+  try{
+    const j=await apiGet({action:'get_project',code:CODE,password:PASS});
+    if(!j||j.status!=='ok'||!j.config)return;
+    const o=stageFlags();
+    CONFIG.bgRobOpen=j.config.bgRobOpen; CONFIG.outcomesOpen=j.config.outcomesOpen;
+    CONFIG.extractionOpen=j.config.extractionOpen;
+    const n=stageFlags();
+    if(o.bgRob===n.bgRob&&o.outcomes===n.outcomes)return;
+    refreshGate();onDecision();
+    if(n.outcomes&&!o.outcomes)toast('📊 Outcome extraction just opened — step 4 is now available.',6000);
+    else if(n.bgRob&&!o.bgRob)toast('🧪 Data extraction just opened — steps 2 and 3 are now available.',6000);
+    else toast('A stage of this project was just locked — some steps are no longer available.',6000);
+  }catch(e){}
+}
 // ═══════════════ periodic platform autosave ════════════════════════════════
 // The 4-second session snapshot lives only in this browser tab; this one puts
 // a real draft on the platform every 5 minutes — but only when something
@@ -1064,9 +1085,21 @@ function resetStudyForm(){
 // an uploaded PDF with no submitted decision is the work most easily lost on a
 // switch — ask before clearing it (the PDF itself stays in Drive either way)
 function unsavedSwitchOk(){
-  if(PDF_LINK&&studyId()&&!SUBMITTED.bg&&!SUBMITTED.rob&&!SUBMITTED.out)
-    return confirm('“'+studyId()+'” has an uploaded PDF but its Include/Exclude was NOT submitted yet.\n\nSwitch study anyway? (The form is cleared; the PDF stays in the Drive folder.)');
-  return true;
+  if(!PDF_LINK||!studyId())return true;
+  const f=stageFlags();
+  if(!f.bgRob){
+    // full-text stage: the only submission that matters is Include/Exclude
+    if(!SUBMITTED.bg&&!SUBMITTED.rob&&!SUBMITTED.out)
+      return confirm('“'+studyId()+'” has an uploaded PDF but its Include/Exclude was NOT submitted yet.\n\nSwitch study anyway? (The form is cleared; the PDF stays in the Drive folder.)');
+    return true;
+  }
+  // v5.43: in the staged extraction, warn per missing SECTION — “Submit RoB”
+  // alone must not feel like the study is done while Background was never sent
+  const missing=[!SUBMITTED.bg?'Background':null,!SUBMITTED.rob?'Risk of Bias':null,
+                 (f.outcomes&&!SUBMITTED.out)?'Outcomes':null].filter(Boolean);
+  if(!missing.length)return true;
+  return confirm('“'+studyId()+'” still has UNSUBMITTED sections: '+missing.join(', ')+'.\n\n'
+    +'Submit them (or save a draft) first if you want to keep that work — switching clears the form. Switch anyway?');
 }
 function newStudy(){
   resetStudyForm();
@@ -1100,7 +1133,7 @@ function onIdentity(){updateBadge();refreshGate();
 function onDecision(){const ex=$('fDecision').value==='Exclude';
   // v5.40: in the full-text stage the primary action for an INCLUDED study is
   // a SUBMIT button, not "Continue to Background" (extraction comes later)
-  const locked=!(CONFIG&&CONFIG.extractionOpen);
+  const locked=!stageFlags().bgRob;
   $('reasonWrap').classList.toggle('hidden',!ex);
   $('btnExclude').classList.toggle('hidden',!ex);
   $('btnToBg').classList.toggle('hidden',ex||locked);
@@ -1744,7 +1777,13 @@ async function submitRoB(){
     // v5.20: the RoB help/confirm state used to be discarded server-side —
     // Dror's dashboard could never see a flagged RoB assessment
     needs_help:$('rNeedsHelp').checked,confirmed:$('rConfirmed').checked});
-  if(j.status==='ok'){toast('RoB saved ✓');SUBMITTED.rob=true;markDone(2);
+  if(j.status==='ok'){
+    // v5.43: when outcomes are a later stage, say what comes next — but never
+    // call the study done while its Background was not actually submitted
+    if(stageFlags().outcomes)toast('RoB saved ✓');
+    else if(!SUBMITTED.bg)toast('RoB saved ✓ — but the Background section has NOT been submitted: go to step 2 and press “Submit background now”.',7000);
+    else toast('RoB saved ✓ — Background + RoB done for this study; outcomes come in a later stage. Pick the next study from step 1.',6500);
+    SUBMITTED.rob=true;markDone(2);
     if(!FINISHING)persistSnapshot('in-progress',true);
     return true;}
   toast(j.message||'Error');return false;
@@ -2694,7 +2733,9 @@ function applyPayload(p){
 let FINISHING=false;
 async function finishStudy(){
   if(FINISHING)return;
-  if(!(CONFIG&&CONFIG.extractionOpen)){toast('⚠ Data extraction is not open on this project yet — this stage is full-text screening');goStep(0);return;}
+  if(!stageFlags().bgRob){toast('⚠ Data extraction is not open on this project yet — this stage is full-text screening');goStep(0);return;}
+  // v5.43: Finish submits everything incl. outcomes — it waits for that stage
+  if(!stageFlags().outcomes){toast('⚠ Outcome extraction is not open yet — submit Background and Risk of Bias with their own buttons; “Finish study” comes with the outcomes stage');return;}
   if(!studyId()){toast('Set the study identity first (step 1)');goStep(0);return;}
   // outcomes with data (an empty extra tab is ignored)
   const realOut=outcomes.map((o,i)=>({o,i})).filter(x=>!isEmptyOutcome(x.o));
@@ -2782,14 +2823,30 @@ async function finishStudy(){
     if(btn){btn.disabled=false;btn.textContent='✔ Finish study — submit everything';}
   }
 }
+// v5.43: the v5.38 phase gate is now TWO stages — Background + Risk of Bias
+// open first, Outcomes separately. A project from before the split reads its
+// one legacy flag into both.
+function stageFlags(){
+  const c=CONFIG||{};
+  let f;
+  if(c.bgRobOpen===undefined&&c.outcomesOpen===undefined){
+    const x=!!c.extractionOpen; f={bgRob:x,outcomes:x};
+  } else f={bgRob:!!c.bgRobOpen,outcomes:!!c.outcomesOpen};
+  if(f.outcomes&&!f.bgRob)f.bgRob=true;   // the stages are a ladder — the server enforces it too
+  return f;
+}
 // Extraction may not start until step 1 is settled: the study is identified,
 // the decision is Include, and the paper's PDF is in the project's Drive folder.
-function extractionBlock(){
-  // v5.38 (Dror): PHASE GATE — the whole extraction side stays locked until he
-  // opens it from the Dashboard; until then this GUI is the full-text
-  // include/exclude station (the backend refuses extraction submits too)
-  if(!(CONFIG&&CONFIG.extractionOpen))
+// n = the step being entered (1 Background, 2 RoB, 3 Outcomes).
+function extractionBlock(n){
+  // v5.38 (Dror): PHASE GATE — the extraction side stays locked until opened
+  // from the Dashboard; until then this GUI is the full-text include/exclude
+  // station (the backend refuses extraction submits too)
+  const f=stageFlags();
+  if(!f.bgRob)
     return 'This project is in the full-text screening stage — pick each study, upload its PDF, and Submit its Include/Exclude decision.';
+  if(n===3&&!f.outcomes)
+    return 'Outcome extraction is not open on this project yet — for now, submit Background and Risk of Bias for each study.';
   if(!studyId())               return 'Enter the study’s first author and year first.';
   if($('fDecision').value!=='Include')
                                return 'Decide the inclusion first — set “Include” to extract, or submit the exclusion.';
@@ -2797,15 +2854,26 @@ function extractionBlock(){
   return '';
 }
 function refreshGate(){
-  const why=extractionBlock();
-  const locked=!(CONFIG&&CONFIG.extractionOpen);
-  ['st1','st2','st3'].forEach(id=>{const el=$(id); if(el){el.classList.toggle('locked',!!why);el.title=why||'';}});
+  const f=stageFlags();
+  const why=extractionBlock(1), whyOut=extractionBlock(3);
+  const locked=!f.bgRob;
+  ['st1','st2'].forEach(id=>{const el=$(id); if(el){el.classList.toggle('locked',!!why);el.title=why||'';}});
+  const s3=$('st3'); if(s3){s3.classList.toggle('locked',!!whyOut);s3.title=whyOut||'';}
   const b=$('btnToBg'); if(b){b.disabled=!!why;b.title=why||'';}
   // while the project is in the screening stage the banner explains the flow —
   // the red note would just repeat it on every study, so it only shows for
   // per-study blockers once extraction is open
   const n=$('gateNote'); if(n){n.textContent=locked?'':why;n.classList.toggle('hidden',locked||!why);}
-  const pb=$('phaseBanner'); if(pb)pb.classList.toggle('hidden',!locked);
+  const pb=$('phaseBanner');
+  if(pb){
+    if(locked){
+      pb.innerHTML='<b>🔎 Full-text screening.</b> <span class="muted">For each study: <b>① pick it</b> from the list · <b>② upload its PDF</b> · <b>③ decide</b> Include or Exclude · <b>④ Submit</b>. The next study loads automatically.</span>';
+      pb.classList.remove('hidden');
+    }else if(!f.outcomes){
+      pb.innerHTML='<b>🧪 Extraction — Background &amp; Risk of Bias.</b> <span class="muted">For each included study, fill <b>2 - Background</b> and <b>3 - Risk of Bias</b> and submit each. <b>4 - Outcomes</b> opens in a later stage.</span>';
+      pb.classList.remove('hidden');
+    }else pb.classList.add('hidden');
+  }
   // v5.40: the include button + per-study checklist
   const inc=$('btnInclude');
   if(inc){
@@ -2841,7 +2909,9 @@ async function downloadRetrieval(){
   }catch(e){toast('❌ '+e);}
 }
 function goStep(n){
-  if(n>0){const why=extractionBlock(); if(why){toast('⚠ '+why);n=0;}}
+  if(n>0){const why=extractionBlock(n); if(why){toast('⚠ '+why);
+    // stay where you are instead of bouncing to step 1 mid-extraction
+    n=[0,1,2,3].find(i=>$('st'+i).classList.contains('active'))||0;}}
   [0,1,2,3].forEach(i=>{$('view'+i).classList.toggle('hidden',i!==n);$('st'+i).classList.toggle('active',i===n);});
   refreshGate();
 }
@@ -2895,7 +2965,7 @@ function busyEnd(){
   $('busyBox').classList.add('hidden');
   $('app').removeAttribute('inert');
 }
-let toastT;function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3400);}
+let toastT;function toast(msg,ms){const t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),ms||3400);}
 
 // ─── init ───
 (async function(){
@@ -2935,6 +3005,9 @@ let toastT;function toast(msg){const t=$('toast');t.textContent=msg;t.classList.
   setInterval(checkVersion, 5*60*1000);
   window.addEventListener('focus', checkVersion);
   setInterval(autoSaveDraft, 5*60*1000);
+  // v5.43: stage toggles reach signed-in sessions (throttled inside)
+  setInterval(refreshStageFlags, 5*60*1000);
+  window.addEventListener('focus', refreshStageFlags);
 })();
 </script>
 </body>
